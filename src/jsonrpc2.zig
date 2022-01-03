@@ -5,64 +5,65 @@ pub const json_rpc_version = "2.0";
 const default_message_size: usize = 8192;
 const Allocator = std.mem.Allocator;
 
-pub const Error = struct {
-    code: i64,
-    message: []const u8,
-    data: ?json.Value,
+pub const ErrorCode = enum(i64) {
+    // UnknownError should be used for all non coded errors.
+    UnknownError = -32001,
 
-    pub const Code = enum(i64) {
-        // UnknownError should be used for all non coded errors.
-        UnknownError = -32001,
+    // ParseError is used when invalid JSON was received by the server.
+    ParseError = -32700,
 
-        // ParseError is used when invalid JSON was received by the server.
-        ParseError = -32700,
+    //InvalidRequest is used when the JSON sent is not a valid Request object.
+    InvalidRequest = -32600,
 
-        //InvalidRequest is used when the JSON sent is not a valid Request object.
-        InvalidRequest = -32600,
+    // MethodNotFound should be returned by the handler when the method does
+    // not exist / is not available.
+    MethodNotFound = -32601,
 
-        // MethodNotFound should be returned by the handler when the method does
-        // not exist / is not available.
-        MethodNotFound = -32601,
+    // InvalidParams should be returned by the handler when method
+    // parameter(s) were invalid.
+    InvalidParams = -32602,
 
-        // InvalidParams should be returned by the handler when method
-        // parameter(s) were invalid.
-        InvalidParams = -32602,
+    // InternalError is not currently returned but defined for completeness.
+    InternalError = -32603,
 
-        // InternalError is not currently returned but defined for completeness.
-        InternalError = -32603,
-
-        //ServerOverloaded is returned when a message was refused due to a
-        //server being temporarily unable to accept any new messages.
-        ServerOverloaded = -32000,
-    };
+    //ServerOverloaded is returned when a message was refused due to a
+    //server being temporarily unable to accept any new messages.
+    ServerOverloaded = -32000,
 };
 
-// HdrContentLength is the HTTP header name of the length of the content part in bytes. This header is required.
-// This entity header indicates the size of the entity-body, in bytes, sent to the recipient.
-//
-// RFC 7230, section 3.3.2: Content-Length:
-//  https://tools.ietf.org/html/rfc7230#section-3.3.2
-const HdrContentLength = "Content-Length";
+pub fn RPCError(
+    comptime ResultErrorData: type,
+) type {
+    return struct {
+        code: i64,
+        message: []const u8,
+        data: ?ResultErrorData,
+    };
+}
 
-const MaxDepth = 30;
+const HdrContentLength = "Content-Length";
 
 pub const ID = union(enum) {
     Name: []const u8,
     Number: i64,
 };
 
-pub const Request = struct {
-    jsonrpc: []const u8 = "2.0",
-    method: []const u8,
-    params: ?json.Value = null,
-    id: ID,
-};
+pub fn RPCequest(
+    comptime ParamType: type,
+) type {
+    return struct {
+        jsonrpc: []const u8 = "2.0",
+        method: []const u8,
+        params: ?ParamType = null,
+        id: ID,
+    };
+}
 
 test "Request.ecnode jsonrpc 2.0" {
     var dyn = DynamicWriter.init(std.testing.allocator);
     defer dyn.deinit();
 
-    var r = Request{
+    var r = RPCequest(struct {}){
         .method = "",
         .id = .{
             .Number = 0,
@@ -76,17 +77,28 @@ test "Request.ecnode jsonrpc 2.0" {
     // std.debug.print("\n{s}\n", .{dyn.list.items});
 }
 
-pub const Response = struct {
-    jsonrpc: []const u8,
-    result: ?json.Value,
-    @"error": ?Error,
-    id: ?ID,
-};
+pub fn RPCResponse(
+    comptime ResultType: type,
+    comptime ResultErrorData: type,
+) type {
+    return struct {
+        jsonrpc: []const u8,
+        result: ?ResultType,
+        @"error": ?RPCError(ResultErrorData),
+        id: ?ID,
+    };
+}
 
 pub fn Conn(
+    // Read/write types and options
     comptime ReaderType: type,
     comptime read_buffer_size: usize,
     comptime WriterType: type,
+
+    //rpc
+    comptime ParamType: type,
+    comptime ResultType: type,
+    comptime ResultErrorDataType: type,
 ) type {
     return struct {
         const Self = @This();
@@ -100,7 +112,11 @@ pub fn Conn(
 
         allocator: Allocator,
 
-        const ReadStream = std.io.BufferedReader(read_buffer_size, ReaderType);
+        pub const ReadStream = std.io.BufferedReader(read_buffer_size, ReaderType);
+
+        pub const Request = RPCequest(ParamType);
+
+        pub const Response = RPCResponse(ResultType, ResultErrorDataType);
 
         const QueueEntry = struct {
             request: Request = undefined,
@@ -205,7 +221,7 @@ pub fn Conn(
         fn writeResponse(self: *Self, q: *QueueEntry) !void {
             if (self.response) |response| {
                 var w = DynamicWriter.init(q.arena.allocator());
-                try response.encode(w.writer());
+                try json.stringify(response, .{}, w.writer());
                 try self.write_sream.print("{}: {}\r\n\r\n", .{
                     HdrContentLength, w.list.items.len,
                 });
